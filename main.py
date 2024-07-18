@@ -10,7 +10,10 @@ import torch
 import torch.nn as nn
 import torchvision
 from torchvision import transforms
+from transformers import BertTokenizer, BertModel
 
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model_bert = BertModel.from_pretrained('bert-base-uncased')
 
 def set_seed(seed):
     random.seed(seed)
@@ -108,6 +111,7 @@ class VQADataset(torch.utils.data.Dataset):
         self.idx2question = dataset.idx2question
         self.idx2answer = dataset.idx2answer
 
+
     def __getitem__(self, idx):
         """
         対応するidxのデータ（画像，質問，回答）を取得．
@@ -128,15 +132,36 @@ class VQADataset(torch.utils.data.Dataset):
         mode_answer_idx : torch.Tensor  (1)
             10人の回答者の回答の中で最頻値の回答のid
         """
+
+
+        print(idx)
         image = Image.open(f"{self.image_dir}/{self.df['image'][idx]}")
         image = self.transform(image)
+
+
         question = np.zeros(len(self.idx2question) + 1)  # 未知語用の要素を追加
-        question_words = self.df["question"][idx].split(" ")
+        #質問文の前処理
+        question_words = self.df["question"][idx]
+
+        question_words = process_text(question_words)
+        question_words = question_words.split(" ")
         for word in question_words:
             try:
                 question[self.question2idx[word]] = 1  # one-hot表現に変換
             except KeyError:
                 question[-1] = 1  # 未知語
+
+        """
+
+        # トークナイズしてテンソルに変換
+        inputs = tokenizer(question_words, return_tensors='pt', padding=True, truncation=True)
+
+        # BERTモデルに入力し、分散表現を取得
+        with torch.no_grad():
+            outputs = model_bert(**inputs)
+
+        question = outputs.last_hidden_state.contiguous()
+        """
 
         if self.answer:
             answers = [self.answer2idx[process_text(answer["answer"])] for answer in self.df["answers"][idx]]
@@ -366,21 +391,24 @@ def main():
     # dataloader / model
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.ToTensor()
+        transforms.RandomRotation(10),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     train_dataset = VQADataset(df_path="./data/train.json", image_dir="./data/train", transform=transform)
     test_dataset = VQADataset(df_path="./data/valid.json", image_dir="./data/valid", transform=transform, answer=False)
     test_dataset.update_dict(train_dataset)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=2, pin_memory=True)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
 
     model = VQAModel(vocab_size=len(train_dataset.question2idx)+1, n_answer=len(train_dataset.answer2idx)).to(device)
 
     # optimizer / criterion
-    num_epoch = 20
+    num_epoch = 3
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)
 
     # train model
     for epoch in range(num_epoch):
